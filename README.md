@@ -1,4 +1,4 @@
-This is my tables from my database.
+This is my tables from my database. Press view in code to view better.
 
 mysql> DESC logs;
 +---------------+--------------+------+-----+---------+----------------+
