@@ -24,7 +24,6 @@ cursor = db.cursor(buffered=True)
 
 # Squid log file location
 LOG_FILE = "/var/log/squid/access.log"
-LOG_FILE2 = "/var/log/c-icap/server.log"
 
 VALID_WEBSITE_REGEX = re.compile(r'\b[a-zA-Z0-9.-]+\.(com|net|org|edu|gov|io|uk|sg|au|ca|jp|fr|de|in)\b')
 
@@ -72,7 +71,7 @@ def save_to_mysql_batch(logs):
         print(f"Error saving logs to DB: {e}")
         
 def parse_squid_logs():
-    # Parsing LOG_FILE for normal log entries
+    logs_to_insert = []
     with open(LOG_FILE, "r") as file:
         for line in file:
             parts = line.split()
@@ -97,7 +96,9 @@ def parse_squid_logs():
             if pd.isna(timestamp):
                 continue
                 
-            timestamp = timestamp + timedelta(hours=8)  # Convert to Singapore time.
+            timestamp = timestamp + timedelta(hours=8) #Convert to Singapore time.
+
+            full_log_line = line.strip()  # Capture the full raw log line
 
             should_alert = False
             alert_reason = ""
@@ -107,34 +108,19 @@ def parse_squid_logs():
                 alert_reason = f"Access to {domain} is forbidden during work hours."
 
             if should_alert:
-                create_alert(client_ip, method, url, alert_reason)
+                create_alert(client_ip, method, url, alert_reason) 
 
-    # Parsing LOG_FILE2 for Virus Found logs
-    with open(LOG_FILE2, "r") as file:
-        for line in file:
-        # Check if the line contains "LOG Virus found"
-            if "LOG Virus found" in line:
-                # Split the line by commas or spaces (depending on the structure)
-                parts = line.split(',')
-                
-                # Extract Timestamp (first part)
-                timestamp = parts[0].strip() if parts else "Unknown"
-                
-                # Extract URL by searching for "https://"
-                url_start = line.find("https://")
-                url_end = line.find(" ", url_start) if url_start != -1 else len(line)
-                url = line[url_start:url_end].strip() if url_start != -1 else "Unknown"
-                
-                # Extract Message after the URL (this assumes the message starts right after the URL)
-                message_start = url_end
-                message = line[message_start:].strip() if message_start < len(line) else "Unknown"
-                client_ip = "Unknown"
-                method = "GET"
-                alert_reason2 = "Virus detected during download"
-                # Print or process the extracted parts
-                create_alert(client_ip, method, url,alert_reason2)
+            message = f"Request {method} to {url} resulted in status {status_code}"
+            logs_to_insert.append((timestamp.strftime('%Y-%m-%d %H:%M:%S'), client_ip, status_code, method, url, message, process_time, full_log_line))
 
-def create_alert(client_ip, method, url, alert_reason):
+            if len(logs_to_insert) >= 1000:  # Perform batch insert every 1000 entries
+                save_to_mysql_batch(logs_to_insert)
+                logs_to_insert.clear()
+
+    if logs_to_insert:
+        save_to_mysql_batch(logs_to_insert)  # Insert remaining logs
+
+def create_alert(client_ip, method, url, message):
     domain = extract_domain(url)
 
     # Retrieve the existing alert if it exists
@@ -147,8 +133,8 @@ def create_alert(client_ip, method, url, alert_reason):
 
     SEVERITY_THRESHOLDS = {
         "Low": 10,       # Escalates to Medium
-        "Medium": 30,    # Escalates to High
-        "High": 60,      # Escalates to Critical
+        "Medium": 20,    # Escalates to High
+        "High": 30,      # Escalates to Critical
         "Critical": float('inf')
     }
 
@@ -163,7 +149,7 @@ def create_alert(client_ip, method, url, alert_reason):
             cursor.execute(""" 
                 INSERT INTO alerts (client_ip, method, url, message, severity, visit_count, status, timestamp) 
                 VALUES (%s, %s, %s, %s, 'Low', 1, 'Open', NOW())
-            """, (client_ip, method, domain, alert_reason))
+            """, (client_ip, method, domain, message))
             db.commit()
             print(f"New alert created for {client_ip} - {url}")  # Debugging print
             return  # Skip further processing and don't update the resolved alert
@@ -172,9 +158,7 @@ def create_alert(client_ip, method, url, alert_reason):
         new_count = visit_count + 1
 
         # Determine new severity level based on visit count
-        if alert_reason == "Virus detected during download":
-            new_severity = "Critical"
-        elif new_count >= SEVERITY_THRESHOLDS["High"]:
+        if new_count >= SEVERITY_THRESHOLDS["High"]:
             new_severity = "Critical"
         elif new_count >= SEVERITY_THRESHOLDS["Medium"]:
             new_severity = "High"
@@ -182,31 +166,23 @@ def create_alert(client_ip, method, url, alert_reason):
             new_severity = "Medium"
         else:
             new_severity = current_severity  # Maintain current severity
+
         if status in ('Open', 'Acknowledged'):
-            if alert_reason == "Virus detected during download":
-                cursor.execute(""" 
-                    UPDATE alerts 
-                    SET visit_count = 0, timestamp = NOW(), severity = %s 
-                    WHERE id = %s 
-                """, (new_severity, alert_id))
-                db.commit()
-                return
-        cursor.execute(""" 
-            UPDATE alerts 
-            SET visit_count = %s, timestamp = NOW(), severity = %s 
-            WHERE id = %s 
-        """, (new_count, new_severity, alert_id))
-        db.commit()
-        return  # Do not create a new alert if we are updating an existing alert
+            cursor.execute(""" 
+                UPDATE alerts 
+                SET visit_count = %s, timestamp = NOW(), severity = %s 
+                WHERE id = %s 
+            """, (new_count, new_severity, alert_id))
+            db.commit()
+            return  # Do not create a new alert if we are updating an existing alert
 
     # Create a new alert if no existing alert was found
     cursor.execute(""" 
         INSERT INTO alerts (client_ip, method, url, message, severity, visit_count, status, timestamp) 
         VALUES (%s, %s, %s, %s, 'Low', 1, 'Open', NOW())
-    """, (client_ip, method, domain, alert_reason))
+    """, (client_ip, method, domain, message))
     db.commit()
     print(f"New alert created for {client_ip} - {url}")  # Debugging print
-
 
 
 # Flask Web App
@@ -295,11 +271,11 @@ HOME_TEMPLATE = """
 						<div class="tile-header">
 							<i class="ph ph-briefcase"></i>
 							<h3>
-								<span>Ongoing Cases</span>
+								<span>Open cases</span>
 								<span id="logCounter">{{ total_cases }}</span>
 							</h3>
 						</div>
-						<a href="/cases">
+						<a href="/view-cases">
 							<span>Go to cases</span>
 							<span class="icon-button">
 								<i class="ph-caret-right-bold"></i>
@@ -1897,6 +1873,7 @@ EDIT_CASE_TEMPLATE = """
 
                         <label for="status">Status:</label>
                         <select id="status" name="status">
+                            <option value="Open" {% if case['status'] == 'Open' %}selected{% endif %}>Open</option>
                             <option value="In Progress" {% if case['status'] == 'In Progress' %}selected{% endif %}>In Progress</option>
                             <option value="Closed" {% if case['status'] == 'Closed' %}selected{% endif %}>Closed</option>
                         </select>
@@ -2183,7 +2160,7 @@ def index():
     cursor.execute("SELECT COUNT(*) FROM alerts WHERE status = 'Open'")
     total_alerts = cursor.fetchone()[0]
 
-    cursor.execute("SELECT COUNT(*) FROM cases WHERE status = 'In Progress'")
+    cursor.execute("SELECT COUNT(*) FROM cases WHERE status = 'Open'")
     total_cases = cursor.fetchone()[0] 
     
     cursor.execute("""
@@ -2193,6 +2170,8 @@ def index():
     AND status_code IN ('NONE_NONE/200', 'TCP_HIT/200', 'TCP_INM_HIT/304')
     """)
     total_cache = cursor.fetchone()[0]
+    
+    
 
     # If no results found
     if total_logs == 0:
@@ -2229,6 +2208,7 @@ def index():
     total_pages = (total_logs + per_page - 1) // per_page  # Calculate total pages
 
     return render_template_string(HOME_TEMPLATE, logs=log_data, search_query=search_query, total_logs=total_logs, total_alerts=total_alerts, total_cases=total_cases, total_cache=total_cache, page=page, total_pages=total_pages, no_results=no_results)
+
 
 
 @app.route('/website-data')
@@ -3016,4 +2996,3 @@ def view_closed_alerts():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000, debug=True)
-
