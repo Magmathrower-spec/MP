@@ -632,9 +632,6 @@ ALERTS_OPEN_TEMPLATE = """
 					Caching
 				</a>
 			<form method="GET" action="/alerts/open">
-			<div class="box">
-                <input type="text" class="input search-input" name="search" onmouseout="this.value = ''; this.blur();" placeholder="Search URL or Status Code" value="{{ severity_filter }}">
-            </div>
             <button class="button-33" type="button" id="refreshBtn">Refresh</button>
             </form>
 		</div>
@@ -839,9 +836,6 @@ ALERTS_ACKNOWLEDGED_TEMPLATE = """
 					Caching
 				</a>
 			<form method="GET" action="/">
-			<div class="box">
-                <input type="text" class="input search-input" name="search" onmouseout="this.value = ''; this.blur();" placeholder="Search URL or Status Code" value="{{ search_query }}">
-            </div>
             <button class="button-33" type="button" id="refreshBtn">Refresh</button>
             </form>
 		</div>
@@ -1046,9 +1040,6 @@ ALERTS_CLOSED_TEMPLATE = """
 					Caching
 				</a>
 			<form method="GET" action="/">
-			<div class="box">
-                <input type="text" class="input search-input" name="search" onmouseout="this.value = ''; this.blur();" placeholder="Search URL or Status Code" value="{{ search_query }}">
-            </div>
             <button class="button-33" type="button" id="refreshBtn">Refresh</button>
             </form>
 		</div>
@@ -1462,7 +1453,6 @@ CASES_IP_TEMPLATE = """
                         <h3>Most Visited Websites</h3>
                         <canvas id="visitChart" width="400" height="400"></canvas>
                     </article>
-                    
 				</div>
 			<section class="transfer-section">
 			    <div class="table-wrapper">
@@ -1505,7 +1495,7 @@ CASES_IP_TEMPLATE = """
                     {% endfor %}
                     <tbody>
                 </table>
-            </div>r
+            </div>
             <footer class="footer">
 				<div class="bottom-controls">
                     <form action="/clear-logs" style="visibility: hidden;" method="POST" onsubmit="return confirm('Are you sure you want to clear all logs?');">
@@ -2760,9 +2750,9 @@ def create_case_form():
     if len(alert) != 5:
         return f"Error: Expected 5 values but got {len(alert)}", 500
 
-    client_ip, method, url, severity, message = alert  # Now safe to unpack
+    client_ip, method, url, severity, message = alert  
 
-    status_code = "TCP_DENIED/403"  # Example status code
+    status_code = "TCP_DENIED/403"  
 
     return render_template_string(
         CREATE_CASE,
