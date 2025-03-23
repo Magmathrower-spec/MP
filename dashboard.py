@@ -24,6 +24,7 @@ cursor = db.cursor(buffered=True)
 
 # Squid log file location
 LOG_FILE = "/var/log/squid/access.log"
+LOG_FILE2 = "/var/log/c-icap/server.log"
 
 VALID_WEBSITE_REGEX = re.compile(r'\b[a-zA-Z0-9.-]+\.(com|net|org|edu|gov|io|uk|sg|au|ca|jp|fr|de|in)\b')
 
@@ -69,7 +70,8 @@ def save_to_mysql_batch(logs):
         db.commit()
     except Exception as e:
         print(f"Error saving logs to DB: {e}")
-        
+     
+
 def parse_squid_logs():
     logs_to_insert = []
     with open(LOG_FILE, "r") as file:
@@ -109,7 +111,7 @@ def parse_squid_logs():
 
             if should_alert:
                 create_alert(client_ip, method, url, alert_reason) 
-
+            
             message = f"Request {method} to {url} resulted in status {status_code}"
             logs_to_insert.append((timestamp.strftime('%Y-%m-%d %H:%M:%S'), client_ip, status_code, method, url, message, process_time, full_log_line))
 
@@ -119,6 +121,33 @@ def parse_squid_logs():
 
     if logs_to_insert:
         save_to_mysql_batch(logs_to_insert)  # Insert remaining logs
+def parse_icap_logs():
+    # Parsing LOG_FILE2 for Virus Found logs
+    with open(LOG_FILE2, "r") as file:
+        for line in file:
+        # Check if the line contains "LOG Virus found"
+            if "LOG Virus found" in line:
+                # Split the line by commas or spaces (depending on the structure)
+                parts = line.split(',')
+                
+                # Extract Timestamp (first part)
+                timestamp = parts[0].strip() if parts else "Unknown"
+                
+                # Extract URL by searching for "https://"
+                url_start = line.find("https://")
+                url_end = line.find(" ", url_start) if url_start != -1 else len(line)
+                url = line[url_start:url_end].strip() if url_start != -1 else "Unknown"
+                
+                # Extract Message after the URL (this assumes the message starts right after the URL)
+                message_start = url_end
+                message = line[message_start:].strip() if message_start < len(line) else "Unknown"
+                client_ip = "Unknown"
+                method = "GET"
+                alert_reason = "Virus detected during download"
+                # Print or process the extracted parts
+                create_alert(client_ip, method, url,alert_reason)
+                
+        
 
 def create_alert(client_ip, method, url, message):
     domain = extract_domain(url)
@@ -158,7 +187,9 @@ def create_alert(client_ip, method, url, message):
         new_count = visit_count + 1
 
         # Determine new severity level based on visit count
-        if new_count >= SEVERITY_THRESHOLDS["High"]:
+        if message == "Virus detected during download":
+            new_severity = "Critical"
+        elif new_count >= SEVERITY_THRESHOLDS["High"]:
             new_severity = "Critical"
         elif new_count >= SEVERITY_THRESHOLDS["Medium"]:
             new_severity = "High"
@@ -168,21 +199,37 @@ def create_alert(client_ip, method, url, message):
             new_severity = current_severity  # Maintain current severity
 
         if status in ('Open', 'Acknowledged'):
-            cursor.execute(""" 
-                UPDATE alerts 
-                SET visit_count = %s, timestamp = NOW(), severity = %s 
-                WHERE id = %s 
-            """, (new_count, new_severity, alert_id))
-            db.commit()
-            return  # Do not create a new alert if we are updating an existing alert
+            if message == "Virus detected during download":
+                cursor.execute(""" 
+                    UPDATE alerts 
+                    SET visit_count = 1, timestamp = NOW(), severity = %s 
+                    WHERE id = %s 
+                """, (new_severity, alert_id))
+                db.commit()
+                return
+        cursor.execute(""" 
+            UPDATE alerts 
+            SET visit_count = %s, timestamp = NOW(), severity = %s 
+            WHERE id = %s 
+        """, (new_count, new_severity, alert_id))
+        db.commit()
+        return  # Do not create a new alert if we are updating an existing alert
 
     # Create a new alert if no existing alert was found
-    cursor.execute(""" 
-        INSERT INTO alerts (client_ip, method, url, message, severity, visit_count, status, timestamp) 
-        VALUES (%s, %s, %s, %s, 'Low', 1, 'Open', NOW())
-    """, (client_ip, method, domain, message))
-    db.commit()
-    print(f"New alert created for {client_ip} - {url}")  # Debugging print
+    if message == "Virus detected during download":
+        cursor.execute(""" 
+            INSERT INTO alerts (client_ip, method, url, message, severity, visit_count, status, timestamp) 
+            VALUES (%s, %s, %s, %s, 'Critical', 1, 'Open', NOW())
+        """, (client_ip, method, domain, message))
+        db.commit()
+        print(f"New alert created for {client_ip} - {url}")  # Debugging print
+    else:
+        cursor.execute(""" 
+            INSERT INTO alerts (client_ip, method, url, message, severity, visit_count, status, timestamp) 
+            VALUES (%s, %s, %s, %s, 'Low', 1, 'Open', NOW())
+        """, (client_ip, method, domain, message))
+        db.commit()
+        print(f"New alert created for {client_ip} - {url}")  # Debugging print
 
 
 # Flask Web App
@@ -209,7 +256,7 @@ HOME_TEMPLATE = """
 				</span>
 				<h1 class="logo-title">
 					<span>XYZ</span>
-				</h1>
+				</h1>f
 			</div>
 		</div>
 		<div class="app-header-navigation">
@@ -275,7 +322,7 @@ HOME_TEMPLATE = """
 								<span id="logCounter">{{ total_cases }}</span>
 							</h3>
 						</div>
-						<a href="/view-cases">
+						<a href="cases">
 							<span>Go to cases</span>
 							<span class="icon-button">
 								<i class="ph-caret-right-bold"></i>
@@ -298,7 +345,7 @@ HOME_TEMPLATE = """
 						</a>
 					</article>
 					<article>
-                        <h3>Most Visited Websites</h3>
+                        <h3>Most visited websites</h3>
                         <canvas id="visitChart" width="400" height="400"></canvas>
                     </article>
                     
@@ -460,7 +507,7 @@ ALERTS_TEMPLATE = """
                         <canvas id="severityChart" width="400" height="400"></canvas>
 					</article>
 					<article>
-                        <h3>Visit count for websites</h3>
+                        <h3>Alert count</h3>
                         <canvas id="visitChart" width="400" height="400"></canvas>
                     </article>
 				</div>
@@ -655,11 +702,11 @@ ALERTS_OPEN_TEMPLATE = """
 					    </a>
 					</article>
 					<article>
-                        <h3>Most Visited Websites</h3>
+                        <h3>Severity</h3>
                         <canvas id="severityChart" width="400" height="400"></canvas>
                     </article>
 					<article>
-                        <h3>Most Visited Websites</h3>
+                        <h3>Alert count</h3>
                         <canvas id="visitChart" width="400" height="400"></canvas>
                     </article>
                     
@@ -859,11 +906,11 @@ ALERTS_ACKNOWLEDGED_TEMPLATE = """
 					    </a>
 					</article>
 					<article>
-                        <h3>Most Visited Websites</h3>
+                        <h3>Severity</h3>
                         <canvas id="severityChart" width="400" height="400"></canvas>
                     </article>
 					<article>
-                        <h3>Most Visited Websites</h3>
+                        <h3>Alert count</h3>
                         <canvas id="visitChart" width="400" height="400"></canvas>
                     </article>
                     
@@ -1063,11 +1110,11 @@ ALERTS_CLOSED_TEMPLATE = """
 					    </a>
 					</article>
 					<article>
-                        <h3>Most Visited Websites</h3>
+                        <h3>Severity</h3>
                         <canvas id="severityChart" width="400" height="400"></canvas>
                     </article>
 					<article>
-                        <h3>Most Visited Websites</h3>
+                        <h3>Alert count</h3>
                         <canvas id="visitChart" width="400" height="400"></canvas>
                     </article>
                     
@@ -1269,7 +1316,7 @@ CASES_TEMPLATE = """
                         <canvas id="severityChart" width="400" height="400"></canvas>
 					</article>
 					<article>
-                        <h3>Visit count for websites</h3>
+                        <h3>Case count</h3>
                         <canvas id="visitChart" width="400" height="400"></canvas>
                     </article>
 				</div>
@@ -1450,7 +1497,7 @@ CASES_IP_TEMPLATE = """
                         <canvas id="severityChart" width="400" height="400"></canvas>
                     </article>
 					<article>
-                        <h3>Most Visited Websites</h3>
+                        <h3>Case Count</h3>
                         <canvas id="visitChart" width="400" height="400"></canvas>
                     </article>
 				</div>
@@ -1654,11 +1701,11 @@ CASES_CLOSED_TEMPLATE = """
 					    </a>
 					</article>
 					<article>
-                        <h3>Most Visited Websites</h3>
+                        <h3>Severity</h3>
                         <canvas id="severityChart" width="400" height="400"></canvas>
                     </article>
 					<article>
-                        <h3>Most Visited Websites</h3>
+                        <h3>Case count</h3>
                         <canvas id="visitChart" width="400" height="400"></canvas>
                     </article>
                     
@@ -2033,7 +2080,7 @@ CACHING_TEMPLATE = """
 					    </a>
 					</article>
 					<article>
-                        <h3>Most Visited Websites</h3>
+                        <h3>Cache count</h3>
                         <canvas id="visitChart" width="400" height="400"></canvas>
                     </article> 
 				</div>
@@ -2134,6 +2181,7 @@ CACHING_TEMPLATE = """
 @app.route('/')
 def index():
     parse_squid_logs()
+    parse_icap_logs()
     search_query = request.args.get('search', '')
     page = request.args.get('page', 1, type=int)  # Get current page number
     per_page = 10  # Number of logs per page
@@ -2150,7 +2198,7 @@ def index():
     cursor.execute("SELECT COUNT(*) FROM alerts WHERE status = 'Open'")
     total_alerts = cursor.fetchone()[0]
 
-    cursor.execute("SELECT COUNT(*) FROM cases WHERE status = 'Open'")
+    cursor.execute("SELECT COUNT(*) FROM cases WHERE status = 'In Progress'")
     total_cases = cursor.fetchone()[0] 
     
     cursor.execute("""
@@ -2245,6 +2293,7 @@ def website_data():
 @app.route('/alerts')
 def view_alerts():
     parse_squid_logs()
+    parse_icap_logs()
     
     # Get total number of alerts
     cursor.execute("SELECT COUNT(*) FROM alerts")
